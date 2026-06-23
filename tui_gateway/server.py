@@ -736,13 +736,17 @@ def _profile_home(profile: str | None) -> Path | None:
     try:
         from hermes_cli import profiles as profiles_mod
 
-        home = Path(profiles_mod.get_profile_dir(name))
+        canon = profiles_mod.normalize_profile_name(name)
+        profiles_mod.validate_profile_name(canon)
+        if not profiles_mod.profile_exists(canon):
+            return None
+        home = Path(profiles_mod.get_profile_dir(canon))
     except Exception:
         return None
     # Already the launch profile? No override needed.
     if home.resolve() == Path(_hermes_home).resolve():
         return None
-    return home if (home / "state.db").exists() or home.exists() else None
+    return home
 
 
 # Placeholder ``terminal.cwd`` values that don't name a real directory — the

@@ -336,12 +336,40 @@ def get_profile_dir(name: str) -> Path:
     return _get_profiles_root() / canon
 
 
+_STATE_ONLY_PROFILE_FILES = frozenset({
+    "state.db",
+    "state.db-wal",
+    "state.db-shm",
+    "state.db-journal",
+})
+
+
+def _is_state_only_profile_dir(profile_dir: Path) -> bool:
+    """Return True for zombie profile dirs that contain only generated SQLite state.
+
+    Dashboard/global-remote clients can hold a stale selected profile name. If a
+    deleted profile's directory is recreated with only ``state.db`` artifacts,
+    treating that directory as a real profile resurrects it in ``profile list``
+    and lets later profile-scoped reads keep the zombie alive. Real profiles
+    created by ``hermes profile create`` have at least identity/config files or
+    bootstrap subdirectories, so a state-only directory is safe to ignore.
+    """
+    if not profile_dir.is_dir():
+        return False
+    try:
+        entries = [entry.name for entry in profile_dir.iterdir()]
+    except OSError:
+        return False
+    return bool(entries) and all(name in _STATE_ONLY_PROFILE_FILES for name in entries)
+
+
 def profile_exists(name: str) -> bool:
-    """Check whether a profile directory exists."""
+    """Check whether a profile directory exists and is not a state-only zombie."""
     canon = normalize_profile_name(name)
     if canon == "default":
         return True
-    return get_profile_dir(canon).is_dir()
+    profile_dir = get_profile_dir(canon)
+    return profile_dir.is_dir() and not _is_state_only_profile_dir(profile_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -750,6 +778,8 @@ def list_profiles() -> List[ProfileInfo]:
             if name == "default":
                 continue  # already added as the built-in default above
             if not _PROFILE_ID_RE.match(name):
+                continue
+            if _is_state_only_profile_dir(entry):
                 continue
             model, provider = _read_config_model(entry)
             alias_name = find_alias_for_profile(name)
