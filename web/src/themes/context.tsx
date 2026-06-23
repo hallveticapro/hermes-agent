@@ -55,6 +55,74 @@ function migrateThemeName(name: string): string {
   return THEME_NAME_ALIASES[name] ?? name;
 }
 
+interface DashboardThemeBootstrap {
+  active?: string;
+  definition?: DashboardTheme;
+}
+
+declare global {
+  interface Window {
+    __HERMES_BOOTSTRAP_THEME__?: DashboardThemeBootstrap;
+  }
+}
+
+function getBootstrappedTheme(): DashboardThemeBootstrap | null {
+  if (typeof window === "undefined") return null;
+  const boot = window.__HERMES_BOOTSTRAP_THEME__;
+  if (!boot || typeof boot !== "object") return null;
+  const active = typeof boot.active === "string" && boot.active.trim()
+    ? migrateThemeName(boot.active.trim())
+    : undefined;
+  const definition =
+    boot.definition &&
+    typeof boot.definition === "object" &&
+    typeof boot.definition.name === "string" &&
+    boot.definition.name.trim()
+      ? {
+          ...boot.definition,
+          name: migrateThemeName(boot.definition.name.trim()),
+        }
+      : undefined;
+  return { active, definition };
+}
+
+function builtInThemeEntries(): ThemeListEntry[] {
+  return Object.values(BUILTIN_THEMES).map((t) => ({
+    name: t.name,
+    label: t.label,
+    description: t.description,
+  }));
+}
+
+function initialAvailableThemes(
+  bootstrap: DashboardThemeBootstrap | null,
+): ThemeListEntry[] {
+  const entries = builtInThemeEntries();
+  const definition = bootstrap?.definition;
+  if (
+    definition &&
+    !BUILTIN_THEMES[definition.name] &&
+    !entries.some((entry) => entry.name === definition.name)
+  ) {
+    entries.push({
+      name: definition.name,
+      label: definition.label,
+      description: definition.description,
+      definition,
+    });
+  }
+  return entries;
+}
+
+function initialUserThemeDefs(
+  bootstrap: DashboardThemeBootstrap | null,
+): Record<string, DashboardTheme> {
+  const definition = bootstrap?.definition;
+  return definition && !BUILTIN_THEMES[definition.name]
+    ? { [definition.name]: definition }
+    : {};
+}
+
 /** Tracks fontUrls we've already injected so multiple theme switches don't
  *  pile up <link> tags. Keyed by URL. */
 const INJECTED_FONT_URLS = new Set<string>();
@@ -407,15 +475,27 @@ function applyTheme(theme: DashboardTheme) {
 // ---------------------------------------------------------------------------
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
+  const bootstrapTheme = useMemo(() => getBootstrappedTheme(), []);
+
   /** Name of the currently active theme (built-in id or user YAML name). */
   const [themeName, setThemeName] = useState<string>(() => {
     if (typeof window === "undefined") return "default";
-    const stored = window.localStorage.getItem(STORAGE_KEY) ?? "default";
-    const migrated = migrateThemeName(stored);
-    // Write the migrated name back so future reads converge on the new
-    // key and we eventually retire the alias entry.
-    if (migrated !== stored) {
+    const bootActive = bootstrapTheme?.active;
+    let stored: string | null = null;
+    try {
+      stored = window.localStorage.getItem(STORAGE_KEY);
+    } catch {
+      stored = null;
+    }
+    const initial = bootActive ?? stored ?? "default";
+    const migrated = migrateThemeName(initial);
+    // Write the migrated/server-bootstrapped name back so future reads
+    // converge immediately and do not flash a stale localStorage theme.
+    try {
       window.localStorage.setItem(STORAGE_KEY, migrated);
+    } catch {
+      // Storage can be unavailable in strict/private browser modes; the
+      // bootstrapped server theme still gives this load the right first paint.
     }
     return migrated;
   });
@@ -423,18 +503,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   /** All selectable themes (shown in the picker). Starts with just the
    *  built-ins; the API call below merges in user themes. */
   const [availableThemes, setAvailableThemes] = useState<ThemeListEntry[]>(() =>
-    Object.values(BUILTIN_THEMES).map((t) => ({
-      name: t.name,
-      label: t.label,
-      description: t.description,
-    })),
+    initialAvailableThemes(bootstrapTheme),
   );
 
   /** Full definitions for user themes keyed by name — the API provides
    *  these so custom YAMLs apply without a client-side stub. */
   const [userThemeDefs, setUserThemeDefs] = useState<
     Record<string, DashboardTheme>
-  >({});
+  >(() => initialUserThemeDefs(bootstrapTheme));
 
   /** Active font-override id (independent of theme). `THEME_DEFAULT_FONT_ID`
    *  = no override. Seeded from localStorage so it's applied flash-free. */
@@ -588,11 +664,7 @@ export function useTheme(): ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue>({
   theme: defaultTheme,
   themeName: "default",
-  availableThemes: Object.values(BUILTIN_THEMES).map((t) => ({
-    name: t.name,
-    label: t.label,
-    description: t.description,
-  })),
+  availableThemes: builtInThemeEntries(),
   setTheme: () => {},
   fontId: THEME_DEFAULT_FONT_ID,
   fontChoices: FONT_CHOICES,

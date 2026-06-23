@@ -11798,12 +11798,14 @@ def mount_spa(application: FastAPI):
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
         gated_js = "true" if gated else "false"
+        theme_style, theme_script_body = _dashboard_theme_bootstrap_tags()
         if gated:
             bootstrap_script = (
                 f"<script>"
                 f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"{theme_script_body}"
                 f"</script>"
             )
         else:
@@ -11812,6 +11814,7 @@ def mount_spa(application: FastAPI):
                 f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+                f"{theme_script_body}"
                 f"</script>"
             )
         if prefix:
@@ -11823,7 +11826,7 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
-        html = html.replace("</head>", f"{bootstrap_script}</head>", 1)
+        html = html.replace("</head>", f"{theme_style}{bootstrap_script}</head>", 1)
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -12132,6 +12135,252 @@ def _discover_user_themes() -> list:
         if normalised is not None:
             result.append(normalised)
     return result
+
+
+_DASHBOARD_THEME_STORAGE_KEY = "hermes-dashboard-theme"
+
+_THEME_DENSITY_MULTIPLIERS = {
+    "compact": "0.85",
+    "comfortable": "1",
+    "spacious": "1.2",
+}
+
+_THEME_OVERRIDE_KEY_TO_VAR = {
+    "card": "--color-card",
+    "cardForeground": "--color-card-foreground",
+    "popover": "--color-popover",
+    "popoverForeground": "--color-popover-foreground",
+    "primary": "--color-primary",
+    "primaryForeground": "--color-primary-foreground",
+    "secondary": "--color-secondary",
+    "secondaryForeground": "--color-secondary-foreground",
+    "muted": "--color-muted",
+    "mutedForeground": "--color-muted-foreground",
+    "accent": "--color-accent",
+    "accentForeground": "--color-accent-foreground",
+    "destructive": "--color-destructive",
+    "destructiveForeground": "--color-destructive-foreground",
+    "success": "--color-success",
+    "warning": "--color-warning",
+    "border": "--color-border",
+    "input": "--color-input",
+    "ring": "--color-ring",
+}
+
+_THEME_SERIES_KEY_TO_VAR = {
+    "inputTokenAccent": "--series-input-token",
+    "outputTokenAccent": "--series-output-token",
+}
+
+
+def _json_for_inline_script(value: Any) -> str:
+    """Return JSON safe to embed inside an inline ``<script>`` tag."""
+    text = json.dumps(value, separators=(",", ":"))
+    return (
+        text.replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _style_tag_text(css: str) -> str:
+    """Escape CSS text enough that user-authored CSS cannot close the tag."""
+    return css.replace("</style", "<\\/style")
+
+
+def _theme_css_image_value(value: str) -> str:
+    """Mirror the frontend's theme asset wrapping for early CSS bootstrap."""
+    trimmed = value.strip()
+    if not trimmed:
+        return ""
+    if re.match(r"^(url\(|linear-gradient|radial-gradient|conic-gradient|none$)", trimmed, re.IGNORECASE):
+        return trimmed
+    escaped = trimmed.replace('"', '\\"')
+    return f'url("{escaped}")'
+
+
+def _theme_bootstrap_layer_vars(name: str, layer: Dict[str, Any]) -> Dict[str, str]:
+    hex_val = str(layer.get("hex") or "#ffffff")
+    try:
+        alpha = float(layer.get("alpha", 1.0))
+    except (TypeError, ValueError):
+        alpha = 1.0
+    alpha = max(0.0, min(1.0, alpha))
+    pct = round(alpha * 100)
+    return {
+        f"--{name}": f"color-mix(in srgb, {hex_val} {pct}%, transparent)",
+        f"--{name}-base": hex_val,
+        f"--{name}-alpha": str(alpha),
+    }
+
+
+def _to_css_kebab(value: str) -> str:
+    return re.sub(r"([A-Z])", lambda m: f"-{m.group(1).lower()}", value)
+
+
+def _dashboard_theme_bootstrap_vars(definition: Dict[str, Any]) -> Dict[str, str]:
+    """Build CSS variables for pre-painting an active user dashboard theme.
+
+    The React ThemeProvider applies the same variables after hydration.  This
+    server-side subset exists only to make the first paint match the persisted
+    dashboard.theme, so user-defined themes do not flash Hermes Teal while the
+    SPA waits for ``/api/dashboard/themes``.
+    """
+    vars_out: Dict[str, str] = {}
+
+    palette = definition.get("palette") if isinstance(definition.get("palette"), dict) else {}
+    for layer_name in ("foreground", "midground", "background"):
+        layer = palette.get(layer_name)
+        if isinstance(layer, dict):
+            vars_out.update(_theme_bootstrap_layer_vars(layer_name, layer))
+    warm_glow = palette.get("warmGlow")
+    if isinstance(warm_glow, str) and warm_glow.strip():
+        vars_out["--warm-glow"] = warm_glow
+    if "noiseOpacity" in palette:
+        vars_out["--noise-opacity-mul"] = str(palette.get("noiseOpacity"))
+
+    typography = definition.get("typography") if isinstance(definition.get("typography"), dict) else {}
+    font_sans = typography.get("fontSans")
+    if isinstance(font_sans, str) and font_sans.strip():
+        vars_out["--theme-font-sans"] = font_sans
+        vars_out["--theme-font-display"] = typography.get("fontDisplay") or font_sans
+    font_mono = typography.get("fontMono")
+    if isinstance(font_mono, str) and font_mono.strip():
+        vars_out["--theme-font-mono"] = font_mono
+    for key, css_var in (
+        ("baseSize", "--theme-base-size"),
+        ("lineHeight", "--theme-line-height"),
+        ("letterSpacing", "--theme-letter-spacing"),
+    ):
+        val = typography.get(key)
+        if isinstance(val, str) and val.strip():
+            vars_out[css_var] = val
+
+    layout = definition.get("layout") if isinstance(definition.get("layout"), dict) else {}
+    radius = layout.get("radius")
+    if isinstance(radius, str) and radius.strip():
+        vars_out["--radius"] = radius
+        vars_out["--theme-radius"] = radius
+    density = layout.get("density")
+    if isinstance(density, str) and density in _THEME_DENSITY_MULTIPLIERS:
+        vars_out["--theme-density"] = density
+        vars_out["--theme-spacing-mul"] = _THEME_DENSITY_MULTIPLIERS[density]
+
+    overrides = definition.get("colorOverrides")
+    if isinstance(overrides, dict):
+        for key, css_var in _THEME_OVERRIDE_KEY_TO_VAR.items():
+            val = overrides.get(key)
+            if isinstance(val, str) and val.strip():
+                vars_out[css_var] = val
+
+    series = definition.get("seriesColors")
+    if isinstance(series, dict):
+        for key, css_var in _THEME_SERIES_KEY_TO_VAR.items():
+            val = series.get(key)
+            if isinstance(val, str) and val.strip():
+                vars_out[css_var] = val
+
+    assets = definition.get("assets")
+    if isinstance(assets, dict):
+        for key in _THEME_NAMED_ASSET_KEYS:
+            val = assets.get(key)
+            if isinstance(val, str) and val.strip():
+                vars_out[f"--theme-asset-{key}"] = _theme_css_image_value(val)
+                vars_out[f"--theme-asset-{key}-raw"] = val
+        custom_assets = assets.get("custom")
+        if isinstance(custom_assets, dict):
+            for key, val in custom_assets.items():
+                if not isinstance(key, str) or not re.match(r"^[a-zA-Z0-9_-]+$", key):
+                    continue
+                if isinstance(val, str) and val.strip():
+                    vars_out[f"--theme-asset-custom-{key}"] = _theme_css_image_value(val)
+                    vars_out[f"--theme-asset-custom-{key}-raw"] = val
+
+    component_styles = definition.get("componentStyles")
+    if isinstance(component_styles, dict):
+        for bucket in _THEME_COMPONENT_BUCKETS:
+            props = component_styles.get(bucket)
+            if not isinstance(props, dict):
+                continue
+            for prop, val in props.items():
+                if isinstance(prop, str) and re.match(r"^[a-zA-Z0-9_-]+$", prop) and str(val).strip():
+                    vars_out[f"--component-{bucket}-{_to_css_kebab(prop)}"] = str(val)
+
+    layout_variant = definition.get("layoutVariant")
+    if isinstance(layout_variant, str) and layout_variant.strip():
+        vars_out["--theme-layout-variant"] = layout_variant
+    terminal_background = definition.get("terminalBackground")
+    if isinstance(terminal_background, str) and terminal_background.strip():
+        vars_out["--theme-terminal-background"] = terminal_background
+
+    return vars_out
+
+
+def _dashboard_theme_bootstrap_payload() -> Dict[str, Any]:
+    """Return the active dashboard theme payload embedded into index.html."""
+    config = load_config()
+    active = cfg_get(config, "dashboard", "theme", default="default")
+    if not isinstance(active, str) or not active.strip():
+        active = "default"
+    active = active.strip()
+    payload: Dict[str, Any] = {"active": active}
+    for theme in _discover_user_themes():
+        if theme.get("name") == active:
+            payload["definition"] = theme
+            break
+    return payload
+
+
+def _dashboard_theme_bootstrap_tags() -> Tuple[str, str]:
+    """Return ``(<style>, script_body)`` that prepaints the active theme.
+
+    User-defined dashboard themes normally arrive from ``/api/dashboard/themes``
+    after the React bundle mounts.  Without this bootstrap, an active custom
+    theme first resolves to the built-in Hermes Teal fallback, causing the flash
+    users see on every load.  The inline style handles first paint; the inline
+    script lets ThemeProvider resolve the same custom definition immediately.
+    """
+    payload = _dashboard_theme_bootstrap_payload()
+    definition = payload.get("definition")
+
+    style_tag = ""
+    if isinstance(definition, dict):
+        css_vars = _dashboard_theme_bootstrap_vars(definition)
+        css_lines = [":root {"]
+        for key, value in css_vars.items():
+            css_lines.append(f"  {key}: {value};")
+        css_lines.append("}")
+        custom_css = definition.get("customCSS")
+        if isinstance(custom_css, str) and custom_css.strip():
+            css_lines.extend(["", custom_css])
+        css = _style_tag_text("\n".join(css_lines))
+        style_tag = (
+            '<style id="hermes-dashboard-theme-bootstrap" '
+            'data-hermes-theme-bootstrap="true">\n'
+            f"{css}\n"
+            "</style>"
+        )
+
+    script_body = f"window.__HERMES_BOOTSTRAP_THEME__={_json_for_inline_script(payload)};"
+    active = payload.get("active")
+    if isinstance(active, str) and active:
+        script_body += (
+            "try{window.localStorage.setItem("
+            f"{_json_for_inline_script(_DASHBOARD_THEME_STORAGE_KEY)},"
+            f"{_json_for_inline_script(active)});}}catch(e){{}}"
+        )
+    if isinstance(definition, dict):
+        layout_variant = definition.get("layoutVariant")
+        if not isinstance(layout_variant, str) or not layout_variant.strip():
+            layout_variant = "standard"
+        layout_js = _json_for_inline_script(layout_variant)
+        script_body += (
+            f"document.documentElement.dataset.layoutVariant={layout_js};"
+            f"document.documentElement.style.setProperty(\"--theme-layout-variant\",{layout_js});"
+        )
+    return style_tag, script_body
 
 
 @app.get("/api/dashboard/themes")

@@ -19,6 +19,11 @@ Environment variables:
     MATRIX_HOME_ROOM        Room ID for cron/notification delivery
     MATRIX_REACTIONS        Set "false" to disable processing lifecycle reactions
                             (eyes/checkmark/cross). Default: true
+    MATRIX_PROCESSING_ACK_ENABLED
+                            Send a short human acknowledgement when work starts
+                            (default: false)
+    MATRIX_PROCESSING_ACK_MESSAGES
+                            Pipe-separated acknowledgement phrases to rotate
     MATRIX_REQUIRE_MENTION      Require @mention in rooms (default: true)
     MATRIX_FREE_RESPONSE_ROOMS  Comma-separated room IDs exempt from mention requirement
                                 (alias of matrix.free_response_rooms)
@@ -55,6 +60,7 @@ import inspect
 import logging
 import mimetypes
 import os
+import random
 import re
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -901,6 +907,20 @@ class MatrixAdapter(BasePlatformAdapter):
         self._reactions_enabled: bool = os.getenv(
             "MATRIX_REACTIONS", "true"
         ).lower() not in {"false", "0", "no"}
+        self._processing_ack_enabled: bool = os.getenv(
+            "MATRIX_PROCESSING_ACK_ENABLED", "false"
+        ).lower() in {"true", "1", "yes", "on"}
+        ack_messages_raw = os.getenv("MATRIX_PROCESSING_ACK_MESSAGES", "")
+        self._processing_ack_messages: tuple[str, ...] = tuple(
+            msg.strip()
+            for msg in ack_messages_raw.split("|")
+            if msg.strip()
+        ) or (
+            "Let me check that.",
+            "Looking into it.",
+            "On it — I’ll take a look.",
+            "Got it — I’ll work through it.",
+        )
         self._pending_reactions: dict[tuple[str, str], str] = {}
         # Delay before redacting reactions so Matrix homeservers have time to
         # deliver the final message event without tripping "missing event"
@@ -2987,12 +3007,26 @@ class MatrixAdapter(BasePlatformAdapter):
         task.add_done_callback(self._reaction_redaction_tasks.discard)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add eyes reaction when the agent starts processing a message."""
-        if not self._reactions_enabled:
-            return
+        """Show a lightweight in-progress signal when processing starts."""
         msg_id = event.message_id
         room_id = event.source.chat_id
-        if msg_id and room_id:
+
+        if self._processing_ack_enabled and room_id and not event.is_command():
+            try:
+                metadata = None
+                thread_id = getattr(event.source, "thread_id", None)
+                if thread_id:
+                    metadata = {"thread_id": thread_id}
+                await self.send(
+                    room_id,
+                    random.choice(self._processing_ack_messages),
+                    reply_to=msg_id,
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                logger.debug("Matrix: processing acknowledgement failed: %s", exc)
+
+        if self._reactions_enabled and msg_id and room_id:
             reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
             if reaction_event_id:
                 self._pending_reactions[(room_id, msg_id)] = reaction_event_id
@@ -4323,6 +4357,15 @@ def _apply_yaml_config(yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
         os.environ["MATRIX_AUTO_THREAD"] = str(matrix_cfg["auto_thread"]).lower()
     if "dm_mention_threads" in matrix_cfg and not os.getenv("MATRIX_DM_MENTION_THREADS"):
         os.environ["MATRIX_DM_MENTION_THREADS"] = str(matrix_cfg["dm_mention_threads"]).lower()
+    if "reactions" in matrix_cfg and not os.getenv("MATRIX_REACTIONS"):
+        os.environ["MATRIX_REACTIONS"] = str(matrix_cfg["reactions"]).lower()
+    if "processing_ack_enabled" in matrix_cfg and not os.getenv("MATRIX_PROCESSING_ACK_ENABLED"):
+        os.environ["MATRIX_PROCESSING_ACK_ENABLED"] = str(matrix_cfg["processing_ack_enabled"]).lower()
+    ack_messages = matrix_cfg.get("processing_ack_messages")
+    if ack_messages is not None and not os.getenv("MATRIX_PROCESSING_ACK_MESSAGES"):
+        if isinstance(ack_messages, list):
+            ack_messages = "|".join(str(v) for v in ack_messages)
+        os.environ["MATRIX_PROCESSING_ACK_MESSAGES"] = str(ack_messages)
     return None
 
 

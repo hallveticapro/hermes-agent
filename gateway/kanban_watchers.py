@@ -55,6 +55,31 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
+def _kanban_human_notifications_enabled() -> bool:
+    """Return True when terminal Kanban pings should deliver human summaries.
+
+    Default notifications include task IDs and worker names because they are
+    useful for operations/debugging. Gateway-facing profiles can opt into a
+    friendlier UX with either ``kanban.notification_style: human`` in
+    config.yaml or ``HERMES_KANBAN_NOTIFICATION_STYLE=human`` in the runtime
+    environment. The env var wins so service managers can override without a
+    config rewrite.
+    """
+    raw = os.getenv("HERMES_KANBAN_NOTIFICATION_STYLE", "").strip().lower()
+    if not raw:
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = load_config() or {}
+            kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+            raw = str(kcfg.get("notification_style") or "").strip().lower()
+            if not raw and bool(kcfg.get("human_notifications", False)):
+                raw = "human"
+        except Exception:
+            raw = ""
+    return raw in {"human", "natural", "summary", "summary_only"}
+
+
 def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
     """Take an exclusive, non-blocking advisory lock for the sole dispatcher.
 
@@ -321,6 +346,7 @@ class GatewayKanbanWatchersMixin:
                     title = (task.title if task else sub["task_id"])[:120]
                     for ev in d["events"]:
                         kind = ev.kind
+                        human_notifications = _kanban_human_notifications_enabled()
                         # Identity prefix: attribute terminal pings to the
                         # worker that did the work. Makes fleets (where one
                         # chat subscribes to many tasks) legible at a glance.
@@ -333,6 +359,7 @@ class GatewayKanbanWatchersMixin:
                             # task.result for legacy rows written before
                             # runs shipped.
                             handoff = ""
+                            human_msg = ""
                             payload_summary = None
                             if ev.payload and ev.payload.get("summary"):
                                 payload_summary = str(ev.payload["summary"])
@@ -340,40 +367,66 @@ class GatewayKanbanWatchersMixin:
                                 lines = payload_summary.strip().splitlines()
                                 h = lines[0][:200] if lines else payload_summary[:200]
                                 handoff = f"\n{h}"
+                                human_msg = payload_summary.strip()
                             elif task and task.result:
                                 lines = task.result.strip().splitlines()
                                 r = lines[0][:160] if lines else task.result[:160]
                                 handoff = f"\n{r}"
-                            msg = (
-                                f"✔ {tag}Kanban {sub['task_id']} done"
-                                f" — {title}{handoff}"
-                            )
+                                human_msg = task.result.strip()
+                            if human_notifications:
+                                msg = human_msg or f"Done — I finished “{title}”."
+                            else:
+                                msg = (
+                                    f"✔ {tag}Kanban {sub['task_id']} done"
+                                    f" — {title}{handoff}"
+                                )
                         elif kind == "blocked":
-                            reason = ""
+                            reason_text = ""
                             if ev.payload and ev.payload.get("reason"):
-                                reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
+                                reason_text = str(ev.payload["reason"])[:160]
+                            if human_notifications:
+                                msg = (
+                                    f"I hit a blocker while processing this: {reason_text}"
+                                    if reason_text else
+                                    "I hit a blocker while processing this and need review."
+                                )
+                            else:
+                                reason = f": {reason_text}" if reason_text else ""
+                                msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
-                            err = ""
+                            err_text = ""
                             if ev.payload and ev.payload.get("error"):
-                                err = f"\n{str(ev.payload['error'])[:200]}"
-                            msg = (
-                                f"✖ {tag}Kanban {sub['task_id']} gave up "
-                                f"after repeated spawn failures{err}"
-                            )
+                                err_text = str(ev.payload["error"])[:200]
+                            if human_notifications:
+                                msg = (
+                                    "I couldn't finish this after repeated retries."
+                                    + (f" {err_text}" if err_text else "")
+                                )
+                            else:
+                                err = f"\n{err_text}" if err_text else ""
+                                msg = (
+                                    f"✖ {tag}Kanban {sub['task_id']} gave up "
+                                    f"after repeated spawn failures{err}"
+                                )
                         elif kind == "crashed":
-                            msg = (
-                                f"✖ {tag}Kanban {sub['task_id']} worker crashed "
-                                f"(pid gone); dispatcher will retry"
-                            )
+                            if human_notifications:
+                                msg = "The worker crashed while processing this, so I’ll retry it."
+                            else:
+                                msg = (
+                                    f"✖ {tag}Kanban {sub['task_id']} worker crashed "
+                                    f"(pid gone); dispatcher will retry"
+                                )
                         elif kind == "timed_out":
                             limit = 0
                             if ev.payload and ev.payload.get("limit_seconds"):
                                 limit = int(ev.payload["limit_seconds"])
-                            msg = (
-                                f"⏱ {tag}Kanban {sub['task_id']} timed out "
-                                f"(max_runtime={limit}s); will retry"
-                            )
+                            if human_notifications:
+                                msg = "This is taking longer than expected, so I’ll retry the processing step."
+                            else:
+                                msg = (
+                                    f"⏱ {tag}Kanban {sub['task_id']} timed out "
+                                    f"(max_runtime={limit}s); will retry"
+                                )
                         else:
                             continue
                         metadata: dict[str, Any] = {}

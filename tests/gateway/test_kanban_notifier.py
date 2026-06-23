@@ -88,6 +88,25 @@ def test_kanban_notifier_dedupes_board_slugs_pointing_to_same_db(tmp_path, monke
     assert tid in adapter.sent[0]["text"]
 
 
+def test_kanban_notifier_human_style_delivers_summary_only(tmp_path, monkeypatch):
+    db_path = tmp_path / "human-style.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_NOTIFICATION_STYLE", "human")
+    kb.init_db()
+
+    summary = "I saved the link to your Links list and added a short page summary."
+    _create_completed_subscription(summary=summary)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["text"] == summary
+    assert "Kanban" not in adapter.sent[0]["text"]
+
+
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):
     db_path = tmp_path / "single-owner.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))

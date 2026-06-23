@@ -1,5 +1,6 @@
 """Tests for Matrix platform adapter (mautrix-python backend)."""
 import asyncio
+import os
 import re
 import stat
 import sys
@@ -9,7 +10,7 @@ import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageType
+from gateway.platforms.base import MessageEvent, MessageType
 
 
 def _make_fake_mautrix():
@@ -409,6 +410,111 @@ class TestMatrixTypingIndicator:
     async def test_stop_typing_suppresses_exceptions(self):
         self.adapter._client.set_typing = AsyncMock(side_effect=Exception("network"))
         await self.adapter.stop_typing("!room:example.org")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Processing acknowledgement
+# ---------------------------------------------------------------------------
+
+class TestMatrixProcessingAcknowledgement:
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.source = self.adapter.build_source(
+            chat_id="!room:example.org",
+            chat_name="Test Room",
+            chat_type="group",
+            user_id="@andrew:example.org",
+            user_name="Andrew",
+        )
+
+    @pytest.mark.asyncio
+    async def test_processing_ack_sends_reply_when_enabled(self):
+        self.adapter._processing_ack_enabled = True
+        self.adapter._processing_ack_messages = ("Looking into it.",)
+        self.adapter._reactions_enabled = False
+        self.adapter.send = AsyncMock()
+        event = MessageEvent(
+            text="check this",
+            message_type=MessageType.TEXT,
+            source=self.source,
+            message_id="$event1",
+        )
+
+        await self.adapter.on_processing_start(event)
+
+        self.adapter.send.assert_awaited_once_with(
+            "!room:example.org",
+            "Looking into it.",
+            reply_to="$event1",
+            metadata=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_processing_ack_uses_thread_metadata_when_present(self):
+        self.adapter._processing_ack_enabled = True
+        self.adapter._processing_ack_messages = ("On it.",)
+        self.adapter._reactions_enabled = False
+        self.adapter.send = AsyncMock()
+        threaded_source = self.adapter.build_source(
+            chat_id="!room:example.org",
+            chat_name="Test Room",
+            chat_type="group",
+            user_id="@andrew:example.org",
+            user_name="Andrew",
+            thread_id="$root-event",
+        )
+        event = MessageEvent(
+            text="check this",
+            message_type=MessageType.TEXT,
+            source=threaded_source,
+            message_id="$event1",
+        )
+
+        await self.adapter.on_processing_start(event)
+
+        self.adapter.send.assert_awaited_once_with(
+            "!room:example.org",
+            "On it.",
+            reply_to="$event1",
+            metadata={"thread_id": "$root-event"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_processing_ack_skips_commands(self):
+        self.adapter._processing_ack_enabled = True
+        self.adapter._reactions_enabled = False
+        self.adapter.send = AsyncMock()
+        event = MessageEvent(
+            text="/status",
+            message_type=MessageType.COMMAND,
+            source=self.source,
+            message_id="$event2",
+        )
+
+        await self.adapter.on_processing_start(event)
+
+        self.adapter.send.assert_not_awaited()
+
+
+def test_matrix_yaml_config_bridges_reactions_and_ack(monkeypatch):
+    from plugins.platforms.matrix.adapter import _apply_yaml_config
+
+    monkeypatch.delenv("MATRIX_REACTIONS", raising=False)
+    monkeypatch.delenv("MATRIX_PROCESSING_ACK_ENABLED", raising=False)
+    monkeypatch.delenv("MATRIX_PROCESSING_ACK_MESSAGES", raising=False)
+
+    _apply_yaml_config(
+        {},
+        {
+            "reactions": False,
+            "processing_ack_enabled": True,
+            "processing_ack_messages": ["Let me check that.", "Looking into it."],
+        },
+    )
+
+    assert os.environ["MATRIX_REACTIONS"] == "false"
+    assert os.environ["MATRIX_PROCESSING_ACK_ENABLED"] == "true"
+    assert os.environ["MATRIX_PROCESSING_ACK_MESSAGES"] == "Let me check that.|Looking into it."
 
 
 # ---------------------------------------------------------------------------

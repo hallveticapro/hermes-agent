@@ -4576,6 +4576,89 @@ class TestNormaliseThemeDefinition:
         assert r["palette"]["background"]["alpha"] == 1.0
 
 
+class TestDashboardThemeBootstrap:
+    """Tests for server-side dashboard theme bootstrap injected into index.html."""
+
+    def test_payload_includes_active_user_theme_definition(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        themes_dir = tmp_path / "dashboard-themes"
+        themes_dir.mkdir()
+        (themes_dir / "clean-webui-dark.yaml").write_text(
+            "name: clean-webui-dark\n"
+            "label: Clean WebUI Dark\n"
+            "palette:\n"
+            "  background:\n"
+            "    hex: '#0b1220'\n"
+            "  midground:\n"
+            "    hex: '#e5e7eb'\n"
+            "customCSS: ':root { --background: #0b1220 !important; }'\n"
+        )
+
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli import web_server
+
+        config = load_config()
+        config.setdefault("dashboard", {})["theme"] = "clean-webui-dark"
+        save_config(config)
+
+        payload = web_server._dashboard_theme_bootstrap_payload()
+
+        assert payload["active"] == "clean-webui-dark"
+        assert payload["definition"]["name"] == "clean-webui-dark"
+        assert payload["definition"]["palette"]["background"]["hex"] == "#0b1220"
+
+    def test_tags_prepaint_active_user_theme_and_seed_local_storage(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        themes_dir = tmp_path / "dashboard-themes"
+        themes_dir.mkdir()
+        (themes_dir / "ocean.yaml").write_text(
+            "name: ocean\n"
+            "label: Ocean\n"
+            "palette:\n"
+            "  background:\n"
+            "    hex: '#001122'\n"
+            "  midground:\n"
+            "    hex: '#ddeeff'\n"
+            "layout:\n"
+            "  density: compact\n"
+            "customCSS: '</style><script>alert(1)</script>'\n"
+        )
+
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli import web_server
+
+        config = load_config()
+        config.setdefault("dashboard", {})["theme"] = "ocean"
+        save_config(config)
+
+        style_tag, script_body = web_server._dashboard_theme_bootstrap_tags()
+
+        assert "--background-base: #001122" in style_tag
+        assert "--theme-spacing-mul: 0.85" in style_tag
+        assert "<\\/style>" in style_tag
+        assert "window.__HERMES_BOOTSTRAP_THEME__" in script_body
+        assert "clean-webui-dark" not in script_body
+        assert "ocean" in script_body
+        assert "hermes-dashboard-theme" in script_body
+        assert "localStorage.setItem" in script_body
+
+    def test_builtin_active_theme_seeds_storage_without_inline_definition(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli import web_server
+
+        config = load_config()
+        config.setdefault("dashboard", {})["theme"] = "midnight"
+        save_config(config)
+
+        style_tag, script_body = web_server._dashboard_theme_bootstrap_tags()
+
+        assert style_tag == ""
+        assert '"active":"midnight"' in script_body
+        assert '"definition"' not in script_body
+        assert "localStorage.setItem" in script_body
+
+
 class TestDiscoverUserThemes:
     """Tests for _discover_user_themes() — scans ~/.hermes/dashboard-themes/."""
 
