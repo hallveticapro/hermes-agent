@@ -331,6 +331,39 @@ class GatewayKanbanWatchersMixin:
                                 if not events:
                                     continue
                                 task = _kb.get_task(conn, sub["task_id"])
+                                # ``completed`` event payloads intentionally carry only
+                                # a short preview for dashboard/event-log rendering.
+                                # Human chat notifications need the full handoff; fetch
+                                # it from the closed run row while we still have the DB.
+                                for ev in events:
+                                    if ev.kind != "completed":
+                                        continue
+                                    full_summary = ""
+                                    if getattr(ev, "run_id", None):
+                                        row = conn.execute(
+                                            "SELECT summary FROM task_runs WHERE id = ?",
+                                            (int(ev.run_id),),
+                                        ).fetchone()
+                                        if row and row["summary"]:
+                                            full_summary = str(row["summary"])
+                                    if not full_summary:
+                                        row = conn.execute(
+                                            """
+                                            SELECT summary FROM task_runs
+                                             WHERE task_id = ?
+                                               AND outcome = 'completed'
+                                               AND summary IS NOT NULL
+                                             ORDER BY ended_at DESC, id DESC
+                                             LIMIT 1
+                                            """,
+                                            (sub["task_id"],),
+                                        ).fetchone()
+                                        if row and row["summary"]:
+                                            full_summary = str(row["summary"])
+                                    if full_summary:
+                                        payload = dict(ev.payload or {})
+                                        payload["_full_summary"] = full_summary
+                                        ev.payload = payload
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                                     len(events), sub["task_id"], slug, old_cursor, cursor,
@@ -386,15 +419,17 @@ class GatewayKanbanWatchersMixin:
                         who = (task.assignee if task and task.assignee else None)
                         tag = f"@{who} " if who else ""
                         if kind == "completed":
-                            # Prefer the run's summary (the worker's
-                            # intentional human-facing handoff, carried
-                            # in the event payload), then fall back to
-                            # task.result for legacy rows written before
-                            # runs shipped.
+                            # Prefer the full run summary (the worker's
+                            # intentional human-facing handoff). The completed
+                            # event payload's public ``summary`` field is only
+                            # a short preview, so _collect() injects
+                            # ``_full_summary`` after fetching task_runs.
                             handoff = ""
                             human_msg = ""
                             payload_summary = None
-                            if ev.payload and ev.payload.get("summary"):
+                            if ev.payload and ev.payload.get("_full_summary"):
+                                payload_summary = str(ev.payload["_full_summary"])
+                            elif ev.payload and ev.payload.get("summary"):
                                 payload_summary = str(ev.payload["summary"])
                             if payload_summary:
                                 lines = payload_summary.strip().splitlines()

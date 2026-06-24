@@ -107,6 +107,30 @@ def test_kanban_notifier_human_style_delivers_summary_only(tmp_path, monkeypatch
     assert "Kanban" not in adapter.sent[0]["text"]
 
 
+def test_kanban_notifier_human_style_uses_full_run_summary_not_event_preview(tmp_path, monkeypatch):
+    db_path = tmp_path / "full-run-summary.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_NOTIFICATION_STYLE", "human")
+    kb.init_db()
+
+    summary = (
+        "Rowan got back to me and found that "
+        + "the successful hybrid receipts match structurally; " * 16
+        + "confidence is high for the ledger comparison."
+    )
+    assert len(summary) > 400
+    _create_completed_subscription(summary=summary)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["text"] == summary
+    assert adapter.sent[0]["text"].endswith("confidence is high for the ledger comparison.")
+
+
 def test_kanban_notifier_human_style_strips_ready_to_tell_wrapper(tmp_path, monkeypatch):
     db_path = tmp_path / "ready-wrapper.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
