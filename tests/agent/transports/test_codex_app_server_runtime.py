@@ -295,3 +295,34 @@ class TestSpawnEnvIsolation:
         )
         assert "sandbox_workspace_write.network_access=false" in cmd
         assert all("danger" not in part for part in cmd)
+
+
+class TestMcpElicitationAllowlistConfig:
+    def test_resolver_reads_list_from_profile_config(self, monkeypatch):
+        import agent.codex_runtime as runtime
+
+        monkeypatch.delenv("HERMES_CODEX_MCP_ELICITATION_AUTO_ACCEPT_SERVERS", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {
+                "codex_app_server": {
+                    "mcp_elicitation_auto_accept_servers": ["codex_apps", ""]
+                }
+            },
+        )
+
+        assert runtime._resolve_mcp_elicitation_auto_accept_servers() == ["codex_apps"]
+
+    def test_resolver_supports_comma_separated_env_fallback(self, monkeypatch):
+        import agent.codex_runtime as runtime
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+        monkeypatch.setenv(
+            "HERMES_CODEX_MCP_ELICITATION_AUTO_ACCEPT_SERVERS",
+            "codex_apps, other ",
+        )
+
+        assert runtime._resolve_mcp_elicitation_auto_accept_servers() == [
+            "codex_apps",
+            "other",
+        ]

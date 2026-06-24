@@ -107,6 +107,49 @@ def test_kanban_notifier_human_style_delivers_summary_only(tmp_path, monkeypatch
     assert "Kanban" not in adapter.sent[0]["text"]
 
 
+def test_kanban_notifier_human_style_strips_ready_to_tell_wrapper(tmp_path, monkeypatch):
+    db_path = tmp_path / "ready-wrapper.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_NOTIFICATION_STYLE", "human")
+    kb.init_db()
+
+    _create_completed_subscription(
+        summary=(
+            "Ready to tell Andrew: “Saved — I put the classroom-economy article "
+            "into your Links read-later reminders.” No blocker remains."
+        )
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["text"] == (
+        "Saved — I put the classroom-economy article into your Links read-later reminders."
+    )
+
+
+def test_kanban_notifier_human_style_suppresses_duplicate_summary(tmp_path, monkeypatch):
+    db_path = tmp_path / "duplicate-human-summary.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_NOTIFICATION_STYLE", "human")
+    kb.init_db()
+
+    summary = "Saved — I put the classroom-economy article into your Links read-later reminders."
+    _create_completed_subscription(summary=summary)
+    _create_completed_subscription(summary=summary)
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["text"] == summary
+
+
 def test_kanban_notifier_claim_prevents_second_watcher_send(tmp_path, monkeypatch):
     db_path = tmp_path / "single-owner.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))

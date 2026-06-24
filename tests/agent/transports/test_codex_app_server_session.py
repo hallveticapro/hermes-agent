@@ -562,6 +562,26 @@ class TestServerRequestRouting:
         s.run_turn("hi", turn_timeout=1.0)
         assert ("elic-2", {"action": "decline", "content": None, "_meta": None}) in client.responses
 
+    def test_mcp_elicitation_for_allowlisted_server_auto_accepts(self):
+        """Profiles can explicitly allow noninteractive Codex app connector
+        confirmations without globally accepting every MCP server prompt."""
+        client = FakeClient()
+        client.queue_server_request(
+            "mcpServer/elicitation/request", request_id="elic-allow",
+            threadId="t", turnId="tu1",
+            serverName="codex_apps",
+            mode="form",
+            message="Confirm Google Calendar create_event",
+            requestedSchema={"type": "object", "properties": {}},
+        )
+        client.queue_notification(
+            "turn/completed", threadId="t",
+            turn={"id": "tu1", "status": "completed", "error": None},
+        )
+        s = make_session(client, mcp_elicitation_auto_accept_servers=["codex_apps"])
+        s.run_turn("hi", turn_timeout=1.0)
+        assert ("elic-allow", {"action": "accept", "content": None, "_meta": None}) in client.responses
+
     def test_routing_auto_approve_bypass(self):
         client = FakeClient()
         client.queue_server_request("item/commandExecution/requestApproval", request_id="r1",

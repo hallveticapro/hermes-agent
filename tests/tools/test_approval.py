@@ -848,6 +848,25 @@ class TestForkBombDetection:
         assert dangerous is False
 
 
+class TestKanbanInspectionFalsePositive:
+    """Document the read-only Kanban inspection command that smart mode should review."""
+
+    def test_kanban_show_plus_python_filter_is_pattern_flagged(self):
+        cmd = (
+            "hermes kanban --board second-brain show t_16611eaf --json && "
+            "hermes kanban --board second-brain list --assignee sb_capture_cleaner --json | "
+            "python3 -c 'import sys,json; data=json.load(sys.stdin); "
+            "print(json.dumps([{\"id\":x[\"id\"],\"status\":x[\"status\"],"
+            "\"title\":x[\"title\"]} for x in data if x[\"id\"]==\"t_13119010\"], indent=2))'"
+        )
+
+        dangerous, key, desc = detect_dangerous_command(cmd)
+
+        assert dangerous is True
+        assert key == "script execution via -e/-c flag"
+        assert desc == "script execution via -e/-c flag"
+
+
 class TestGatewayProtection:
     """Prevent agents from starting the gateway outside systemd management."""
 

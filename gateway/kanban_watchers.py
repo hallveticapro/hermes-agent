@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -78,6 +79,38 @@ def _kanban_human_notifications_enabled() -> bool:
         except Exception:
             raw = ""
     return raw in {"human", "natural", "summary", "summary_only"}
+
+
+def _clean_human_kanban_message(message: str) -> str:
+    """Return the exact user-facing text for human-style notifications.
+
+    Final manager-report workers sometimes complete with meta-prose such as
+    ``Ready to tell Andrew: “Saved …” No blocker remains``. That is useful as
+    an internal task comment, but the chat notifier is the user-facing surface:
+    deliver the quoted final answer only.
+    """
+    text = str(message or "").strip()
+    if not text:
+        return ""
+
+    meta_prefix = re.compile(
+        r"^\s*(?:"
+        r"ready\s+to\s+tell\s+(?:andrew|the\s+user|user)|"
+        r"tell\s+(?:andrew|the\s+user|user)|"
+        r"final\s+(?:message|reply)(?:\s+to\s+andrew)?|"
+        r"user[-\s]*facing\s+(?:final\s+)?(?:message|reply)"
+        r")\s*:\s*",
+        re.IGNORECASE,
+    )
+    match = meta_prefix.match(text)
+    if match:
+        rest = text[match.end():].strip()
+        quoted = re.match(r"^[\"'“‘]([^\"'”’]+)[\"'”’]", rest, re.DOTALL)
+        if quoted:
+            return quoted.group(1).strip()
+        return rest.strip(" \t\r\n\"'“”‘’")
+
+    return text.strip(" \t\r\n")
 
 
 def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
@@ -374,7 +407,9 @@ class GatewayKanbanWatchersMixin:
                                 handoff = f"\n{r}"
                                 human_msg = task.result.strip()
                             if human_notifications:
-                                msg = human_msg or f"Done — I finished “{title}”."
+                                msg = _clean_human_kanban_message(
+                                    human_msg or f"Done — I finished “{title}”."
+                                )
                             else:
                                 msg = (
                                     f"✔ {tag}Kanban {sub['task_id']} done"
@@ -436,6 +471,28 @@ class GatewayKanbanWatchersMixin:
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
+                        dedupe_key = None
+                        if human_notifications:
+                            recent = getattr(self, "_kanban_recent_human_notifications", None)
+                            if not isinstance(recent, dict):
+                                recent = {}
+                                setattr(self, "_kanban_recent_human_notifications", recent)
+                            now = time.time()
+                            for old_key, seen_at in list(recent.items()):
+                                if now - float(seen_at or 0) > 300:
+                                    recent.pop(old_key, None)
+                            dedupe_key = (
+                                sub["platform"],
+                                sub["chat_id"],
+                                sub.get("thread_id") or "",
+                                msg,
+                            )
+                            if now - float(recent.get(dedupe_key, 0) or 0) < 120:
+                                logger.debug(
+                                    "kanban notifier: suppressed duplicate human notification for %s",
+                                    sub["task_id"],
+                                )
+                                continue
                         try:
                             await adapter.send(
                                 sub["chat_id"], msg, metadata=metadata,
@@ -469,6 +526,10 @@ class GatewayKanbanWatchersMixin:
                                     )
                             # Reset the failure counter on success.
                             sub_fail_counts.pop(sub_key, None)
+                            if dedupe_key is not None:
+                                recent = getattr(self, "_kanban_recent_human_notifications", None)
+                                if isinstance(recent, dict):
+                                    recent[dedupe_key] = time.time()
                         except Exception as exc:
                             fails = sub_fail_counts.get(sub_key, 0) + 1
                             sub_fail_counts[sub_key] = fails

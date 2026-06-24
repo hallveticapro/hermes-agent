@@ -29,7 +29,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from agent.codex_responses_adapter import _format_responses_error
 from agent.redact import redact_sensitive_text
@@ -208,6 +208,7 @@ class CodexAppServerSession:
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
         client_factory: Optional[Callable[..., CodexAppServerClient]] = None,
+        mcp_elicitation_auto_accept_servers: Optional[Sequence[str]] = None,
     ) -> None:
         self._cwd = cwd or os.getcwd()
         self._codex_bin = codex_bin
@@ -222,6 +223,11 @@ class CodexAppServerSession:
         self._on_event = on_event  # Display hook (kawaii spinner ticks etc.)
         self._routing = request_routing or _ServerRequestRouting()
         self._client_factory = client_factory or CodexAppServerClient
+        self._mcp_elicitation_auto_accept_servers = {
+            str(server).strip()
+            for server in (mcp_elicitation_auto_accept_servers or [])
+            if str(server).strip()
+        }
 
         self._client: Optional[CodexAppServerClient] = None
         self._thread_id: Optional[str] = None
@@ -673,10 +679,17 @@ class CodexAppServerSession:
             # auto-accept — the user already approved Hermes' tools
             # by enabling the runtime, and we never expose anything
             # codex's built-in shell can't already do. For other MCP
-            # servers we decline so the user explicitly opts in via
-            # codex's own auth flow.
+            # servers we decline unless the running profile explicitly
+            # allowlisted the server. Some Codex app connectors use this
+            # path for their own tool-call confirmations; gateway workers
+            # have no interactive Codex UI, so a profile-scoped allowlist is
+            # the narrow way to grant that authority without globally
+            # accepting every MCP prompt.
             server_name = params.get("serverName") or ""
-            if server_name == "hermes-tools":
+            if (
+                server_name == "hermes-tools"
+                or server_name in self._mcp_elicitation_auto_accept_servers
+            ):
                 self._client.respond(
                     rid,
                     {"action": "accept", "content": None, "_meta": None},

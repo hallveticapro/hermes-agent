@@ -25,6 +25,38 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def _resolve_mcp_elicitation_auto_accept_servers() -> list[str]:
+    """Profile config allowlist for Codex MCP elicitation auto-accept.
+
+    Default remains fail-closed. Profiles that intentionally run noninteractive
+    Codex app connectors can opt in with:
+
+        codex_app_server:
+          mcp_elicitation_auto_accept_servers: [codex_apps]
+
+    A comma-separated string is also accepted for gateway env templating.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    section = cfg.get("codex_app_server") if isinstance(cfg, dict) else None
+    raw = None
+    if isinstance(section, dict):
+        raw = section.get("mcp_elicitation_auto_accept_servers")
+    if raw is None:
+        raw = os.environ.get("HERMES_CODEX_MCP_ELICITATION_AUTO_ACCEPT_SERVERS")
+    if isinstance(raw, str):
+        values = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = []
+    return [str(value).strip() for value in values if str(value).strip()]
+
+
 def _codex_note_to_tool_progress(note: dict) -> tuple[str, str, dict] | None:
     """Map a Codex app-server ``item/started`` notification to a Hermes
     tool-progress event ``(tool_name, preview, args)``.
@@ -282,6 +314,9 @@ def run_codex_app_server_turn(
             cwd=cwd,
             approval_callback=approval_callback,
             on_event=_on_codex_event,
+            mcp_elicitation_auto_accept_servers=(
+                _resolve_mcp_elicitation_auto_accept_servers()
+            ),
         )
 
     # NOTE: the user message is ALREADY appended to messages by the
