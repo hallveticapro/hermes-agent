@@ -81,11 +81,13 @@ async def test_enrich_message_with_transcription_omits_duration_on_probe_failure
 
 
 @pytest.mark.asyncio
-async def test_enrich_message_with_transcription_avoids_bogus_no_provider_message_for_backend_key_errors():
+async def test_enrich_message_with_transcription_avoids_bogus_no_provider_message_for_backend_key_errors(tmp_path):
     from gateway.run import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
+    voice_path = tmp_path / "voice.ogg"
+    voice_path.write_bytes(b"fake audio")
 
     with patch(
         "tools.transcription_tools.transcribe_audio",
@@ -93,17 +95,18 @@ async def test_enrich_message_with_transcription_avoids_bogus_no_provider_messag
     ):
         result, transcripts = await runner._enrich_message_with_transcription(
             "caption",
-            ["/tmp/voice.ogg"],
+            [str(voice_path)],
         )
 
     assert "No STT provider is configured" not in result
     assert "trouble transcribing" in result
     assert "caption" in result
     assert transcripts == []
+    assert not voice_path.exists()
 
 
 @pytest.mark.asyncio
-async def test_enrich_message_with_transcription_returns_tuple_for_empty_content_placeholder():
+async def test_enrich_message_with_transcription_returns_tuple_for_empty_content_placeholder(tmp_path):
     """A successful transcription whose caption is the empty-content placeholder
     must still return the ``(text, transcripts)`` tuple.
 
@@ -120,6 +123,8 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
     runner = GatewayRunner.__new__(GatewayRunner)
     runner.config = GatewayConfig(stt_enabled=True)
     runner._has_setup_skill = lambda: False
+    voice_path = tmp_path / "voice.ogg"
+    voice_path.write_bytes(b"fake audio")
 
     with patch(
         "tools.transcription_tools.transcribe_audio",
@@ -131,7 +136,7 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
     ):
         result, transcripts = await runner._enrich_message_with_transcription(
             "(The user sent a message with no text content)",
-            ["/tmp/voice.ogg"],
+            [str(voice_path)],
         )
 
     # The redundant placeholder is stripped, leaving only the transcript prefix.
@@ -139,6 +144,7 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
     assert "(The user sent a message with no text content)" not in result
     # Crucially, the transcripts are still surfaced so callers can echo them.
     assert transcripts == ["hello from a captionless voice note"]
+    assert not voice_path.exists()
 
 
 @pytest.mark.asyncio
