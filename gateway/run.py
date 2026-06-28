@@ -12941,6 +12941,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "[The user sent a voice message but something went wrong "
                     "when I tried to listen to it~ Let them know!]"
                 )
+            finally:
+                try:
+                    os.unlink(path)
+                    logger.debug("Deleted cached voice audio after transcription attempt: %s", path)
+                except FileNotFoundError:
+                    pass
+                except OSError as e:
+                    logger.warning("Failed to delete cached voice audio %s: %s", path, e)
 
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
